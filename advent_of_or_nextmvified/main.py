@@ -1,3 +1,4 @@
+import os
 import sys
 
 import gamspy as gp
@@ -316,26 +317,9 @@ def build_output(
 
 
 def get_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    def loader(file_path: str) -> pd.DataFrame:
-        return pd.read_csv(file_path)
-
-    input = nextmv.load(
-        input_format=nextmv.InputFormat.MULTI_FILE,
-        path="inputs",
-        data_files=[
-            nextmv.DataFile(
-                name="segments.csv", loader=loader, input_data_key="segments"
-            ),
-            nextmv.DataFile(name="assets.csv", loader=loader, input_data_key="assets"),
-            nextmv.DataFile(
-                name="correlation.csv", loader=loader, input_data_key="correlation"
-            ),
-        ],
-    )
-
-    segments = input.data["segments"]
-    assets = input.data["assets"]
-    correlation = input.data["correlation"]
+    segments = pd.read_csv(os.path.join("inputs", "segments.csv"))
+    assets = pd.read_csv(os.path.join("inputs", "assets.csv"))
+    correlation = pd.read_csv(os.path.join("inputs", "correlation.csv"))
 
     return segments, assets, correlation
 
