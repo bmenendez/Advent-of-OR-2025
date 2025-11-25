@@ -1,6 +1,8 @@
+import os
 import sys
+
 import gamspy as gp
-import numpy as np
+import nextmv
 import pandas as pd
 from scipy.stats import norm
 
@@ -9,17 +11,15 @@ def main(
     segments: pd.DataFrame,
     assets: pd.DataFrame,
     correlation_df: pd.DataFrame,
-    profit_weight: float = -1,
-    consider_risk: bool = True,
-    confidence_interval: float = 0.95,
-):
+    options: nextmv.Options,
+) -> nextmv.Output:
     with gp.Container():
         A = gp.Set(
             description="Set of all assets in the portfolio",
             records=assets["asset"].unique(),
         )
         S = gp.Set(description="Set of segments", records=segments["segment_id"])
-        AS = gp.Set(domain=[A, S], records=segments[['asset', 'segment_id']])
+        AS = gp.Set(domain=[A, S], records=segments[["asset", "segment_id"]])
         J = gp.Alias(alias_with=A)
 
         profitability = gp.Parameter(
@@ -29,10 +29,10 @@ def main(
         )
         risk_weight_limit = gp.Parameter(
             description="Maximum allowable average risk weight at the portfolio level",
-            records=0.5,
+            records=options.risk_weight_limit,
         )
         z_score = gp.Parameter(
-            records=norm.ppf(confidence_interval),
+            records=norm.ppf(options.confidence_interval),
             description="Z-score for risk calculation (default: corresponding to 95 percent confidence level in one tail test)",
         )
         lo_a = gp.Parameter(
@@ -98,15 +98,15 @@ def main(
         new_total_exposure = gp.Variable(
             description="Total exposure in new rebalanced portfolio",
             type="Positive",
-            records={"level": 1},
+            records={"level": options.new_total_exposure_initial_value},
         )
         portfolio_exposure_vars = gp.Variable(
             domain=A,
             description="Total exposure in new rebalanced portfolio for asset a",
             type="Positive",
         )
-        portfolio_exposure_vars.lo[A] = (1-lo_a[A]) * current_asset_exposure[A]
-        portfolio_exposure_vars.up[A] = (1+up_a[A]) * current_asset_exposure[A]
+        portfolio_exposure_vars.lo[A] = (1 - lo_a[A]) * current_asset_exposure[A]
+        portfolio_exposure_vars.up[A] = (1 + up_a[A]) * current_asset_exposure[A]
 
         ### --- Constraints --- ###
         # 1. Segment Relationship Constraint
@@ -125,7 +125,8 @@ def main(
             description="This establishes the relationship between the per segment ratio and the asset level exposure of the rebalanced portfolio.",
         )
         asset_exposure[A] = (
-            gp.Sum(AS[A, S], exposure[AS] * segment_vars[AS]) == portfolio_exposure_vars[A]
+            gp.Sum(AS[A, S], exposure[AS] * segment_vars[AS])
+            == portfolio_exposure_vars[A]
         )
 
         # 3. Risk Weight Constraint
@@ -154,7 +155,9 @@ def main(
             + rel_sell_cost[AS] * exposure[AS] * segment_decrease_vars[AS],
         )
         profit_objective_variable = gp.Variable()
-        net_profit = profit - transaction_cost == profit_objective_variable ## Why is this done this way.
+        net_profit = (
+            profit - transaction_cost == profit_objective_variable
+        )  ## Why is this done this way.
         profit_equation = gp.Equation(definition=net_profit)
 
         # 2. Minimize risk
@@ -187,8 +190,8 @@ def main(
             - (1 - alpha) * profit_downside_var,
         )
 
-        if consider_risk:
-            if profit_weight < 0:  # lexicographic
+        if options.consider_risk:
+            if options.profit_weight < 0:  # lexicographic
                 alpha[...] = 1
                 model.solve(solver="xpress", output=sys.stdout)
                 rel_tol = 0.1
@@ -199,11 +202,17 @@ def main(
                 alpha[...] = 0
                 model.equations.append(risk_equation)
                 model.problem = gp.Problem.NLP
-                model.solve(solver="xpress", output=sys.stdout, options=gp.Options(relative_optimality_gap=0.01))
+                model.solve(
+                    solver="xpress",
+                    output=sys.stdout,
+                    options=gp.Options(
+                        relative_optimality_gap=options.relative_optimality_gap
+                    ),
+                )
             else:  # weighted
                 model.equations.append(risk_equation)
                 model.problem = gp.Problem.NLP
-                alpha[...] = profit_weight
+                alpha[...] = options.profit_weight
                 model.solve(solver="xpress", output=sys.stdout)
         else:
             alpha[...] = 1
@@ -215,15 +224,117 @@ def main(
         print(f"Optimized Exposure: {new_total_exposure.toValue()}")
         print(f"Profit Downside: {profit_downside_var.toValue()}")
 
+        output = build_output(
+            options,
+            segment_vars,
+            exposure,
+            portfolio_exposure_vars,
+            current_asset_exposure,
+            profit_objective_variable,
+            profit,
+            transaction_cost,
+            new_total_exposure,
+            profit_downside_var,
+        )
+
+        return output
+
+
+def build_output(
+    options: nextmv.Options,
+    segment_vars: gp.Variable,
+    exposure: gp.Parameter,
+    portfolio_exposure_vars: gp.Variable,
+    current_asset_exposure: gp.Parameter,
+    profit_objective_variable: gp.Variable,
+    profit: gp.Variable,
+    transaction_cost: gp.Variable,
+    new_total_exposure: gp.Variable,
+    profit_downside_var: gp.Variable,
+) -> nextmv.Output:
+    # Extract solution data for segments
+    segments_solution = []
+    segment_vars_df = segment_vars.records
+    exposure_df = exposure.records
+
+    for _, row in segment_vars_df.iterrows():
+        a = row["A"]  # Variable records use 'A'
+        s = row["S"]  # Variable records use 'S'
+        segment_multiplier = row["level"]
+
+        # Find original exposure (parameters also use 'A' and 'S')
+        exposure_row = exposure_df[(exposure_df["A"] == a) & (exposure_df["S"] == s)]
+        if not exposure_row.empty:
+            original_exposure = exposure_row["value"].values[0]
+            segments_solution.append(
+                {
+                    "asset": a,
+                    "segment_id": s,
+                    "original_exposure": original_exposure,
+                    "segment_multiplier": segment_multiplier,
+                    "rebalanced_exposure": original_exposure * segment_multiplier,
+                }
+            )
+
+    # Extract solution data for assets
+    assets_solution = []
+    portfolio_vars_df = portfolio_exposure_vars.records
+    current_exposure_df = current_asset_exposure.records
+
+    for _, row in portfolio_vars_df.iterrows():
+        a = row["A"]  # Variable records use 'A'
+        rebalanced_total = row["level"]
+
+        # Find original exposure
+        # Check column name - could be 'A' or 'asset'
+        asset_col_name = "asset" if "asset" in current_exposure_df.columns else "A"
+        original_row = current_exposure_df[current_exposure_df[asset_col_name] == a]
+        if not original_row.empty:
+            original_total = original_row["value"].values[0]
+            assets_solution.append(
+                {
+                    "asset": a,
+                    "original_exposure": original_total,
+                    "rebalanced_exposure": rebalanced_total,
+                    "exposure_change": rebalanced_total - original_total,
+                }
+            )
+
+    stats = nextmv.Statistics(
+        result=nextmv.ResultStatistics(
+            custom={
+                "net_profit": profit_objective_variable.toValue(),
+                "expected_profit": profit.toValue(),
+                "transaction_cost": transaction_cost.toValue(),
+                "optimized_exposure": new_total_exposure.toValue(),
+                "profit_downside": profit_downside_var.toValue(),
+            },
+        )
+    )
+    output = nextmv.Output(
+        options=options,
+        output_format=nextmv.OutputFormat.MULTI_FILE,
+        statistics=stats,
+        solution_files=[
+            nextmv.csv_solution_file(name="segments", data=segments_solution),
+            nextmv.csv_solution_file(name="assets", data=assets_solution),
+        ],
+    )
+
+    return output
+
 
 def get_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    segments = pd.read_csv("segments.csv")
-    assets = pd.read_csv("assets.csv")
-    correlation = pd.read_csv("correlation.csv")
+    segments = pd.read_csv(os.path.join("inputs", "segments.csv"))
+    assets = pd.read_csv(os.path.join("inputs", "assets.csv"))
+    correlation = pd.read_csv(os.path.join("inputs", "correlation.csv"))
+
     return segments, assets, correlation
 
 
 if __name__ == "__main__":
+    manifest = nextmv.Manifest.from_yaml(dirpath=".")
+    options = manifest.extract_options()
     segments, assets, correlation = get_data()
-    main(segments, assets, correlation)
-
+    output = main(segments, assets, correlation, options)
+    nextmv.write(output=output, path="outputs")
