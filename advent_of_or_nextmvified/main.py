@@ -4,310 +4,299 @@ import sys
 import gamspy as gp
 import nextmv
 import pandas as pd
-from scipy.stats import norm
 
 
 def main(
     segments: pd.DataFrame,
     assets: pd.DataFrame,
-    correlation_df: pd.DataFrame,
     options: nextmv.Options,
 ) -> nextmv.Output:
-    with gp.Container():
-        A = gp.Set(
-            description="Set of all assets in the portfolio",
-            records=assets["asset"].unique(),
-        )
-        S = gp.Set(description="Set of segments", records=segments["segment_id"])
-        AS = gp.Set(domain=[A, S], records=segments[["asset", "segment_id"]])
-        J = gp.Alias(alias_with=A)
+    """
+    Portfolio rebalancing optimization model.
 
-        profitability = gp.Parameter(
-            domain=[A, S],
-            description="Expected profitability for asset a, segment s",
-            records=segments[["asset", "segment_id", "average_profitability"]],
-        )
-        risk_weight_limit = gp.Parameter(
-            description="Maximum allowable average risk weight at the portfolio level",
-            records=options.risk_weight_limit,
-        )
-        z_score = gp.Parameter(
-            records=norm.ppf(options.confidence_interval),
-            description="Z-score for risk calculation (default: corresponding to 95 percent confidence level in one tail test)",
-        )
-        lo_a = gp.Parameter(
-            domain=A,
-            description="Lower bound for asset `a` relative exposure",
-            records=assets[["asset", "max_exposure_decrease"]],
-        )
-        up_a = gp.Parameter(
-            domain=A,
-            description="Upper bound for asset `a` relative exposure",
-            records=assets[["asset", "max_exposure_increase"]],
-        )
-        rel_origination_cost = gp.Parameter(
-            domain=[A, S],
-            description="Per unit cost of increasing the exposure of segment s for asset a",
-            records=segments[
-                ["asset", "segment_id", "rel_origination_cost"]
-            ].values.tolist(),
-        )
-        rel_sell_cost = gp.Parameter(
-            domain=[A, S],
-            description="Per unit cost of decreasing the exposure of segment s for asset a",
-            records=segments[["asset", "segment_id", "rel_sell_cost"]].values.tolist(),
-        )
-        r = gp.Parameter(
-            domain=[A, S],
-            description="Risk weight of segment s for asset a",
-            records=segments[["asset", "segment_id", "risk_weight"]].values.tolist(),
-        )
-        exposure = gp.Parameter(
-            domain=[A, S],
-            description="Current exposure of segment s for asset a.",
-            records=segments[["asset", "segment_id", "exposure"]].values.tolist(),
-        )
-        current_asset_exposure = gp.Parameter(
-            domain=A,
-            description="Total exposure of asset a",
-            records=segments.groupby("asset", as_index=False)["exposure"].sum(),
-        )
-        profit_stdev = gp.Parameter(
-            domain=A, records=assets[["asset", "stdev_profitability"]].values.tolist()
-        )
-        correlation_df.set_index("asset", inplace=True)
-        correlation_matrix = gp.Parameter(
-            domain=[A, J], records=correlation_df, uels_on_axes=True
-        )
+    Maximizes net profit (expected profit - transaction costs) subject to:
+    - Asset exposure bounds (max increase/decrease limits)
+    - Portfolio-level risk weight constraint
 
-        segment_vars = gp.Variable(
-            domain=[A, S],
-            description="Multiplier of original exposure for segment s, asset a in the rebalanced portfolio",
-            type="Positive",
+    Args:
+        segments: DataFrame with columns: asset, segment_id, exposure, average_profitability,
+                  risk_weight, rel_sell_cost, rel_origination_cost
+        assets: DataFrame with columns: asset, max_exposure_decrease, max_exposure_increase
+        options: nextmv.Options object for solver configuration
+
+    Returns:
+        nextmv.Output containing:
+            - segment_results: DataFrame with detailed segment-level results
+            - asset_results: DataFrame with asset-level aggregated results
+            - portfolio_summary: DataFrame with portfolio-level summary metrics
+            - model_status: Solver status information
+    """
+    m = gp.Container()
+
+    # Sets
+    A = gp.Set(
+        m,
+        description="Set of all assets in the portfolio",
+        records=assets["asset"].unique(),
+    )
+    S = gp.Set(
+        m,
+        description="Set of segments",
+        records=segments["segment_id"],
+    )
+    AS = gp.Set(
+        m,
+        domain=[A, S],
+        description="Relevant pairs of assets and segments",
+        records=segments[["asset", "segment_id"]],
+    )
+
+    # Parameters
+    average_profitability = gp.Parameter(
+        m,
+        domain=[A, S],
+        description="Expected profitability for asset a, segment s",
+        records=segments[["asset", "segment_id", "average_profitability"]],
+    )
+    risk_weight_limit = gp.Parameter(
+        m,
+        description="Maximum allowable average risk weight at the portfolio level",
+        records=options.risk_weight_limit,
+    )
+    max_exposure_decrease = gp.Parameter(
+        m,
+        domain=A,
+        description="Lower bound for asset `a` relative exposure",
+        records=assets[["asset", "max_exposure_decrease"]],
+    )
+    max_exposure_increase = gp.Parameter(
+        m,
+        domain=A,
+        description="Upper bound for asset `a` relative exposure",
+        records=assets[["asset", "max_exposure_increase"]],
+    )
+    rel_origination_cost = gp.Parameter(
+        m,
+        domain=[A, S],
+        description="Per unit cost of increasing the exposure of segment s for asset a",
+        records=segments[["asset", "segment_id", "rel_origination_cost"]],
+    )
+    rel_sell_cost = gp.Parameter(
+        m,
+        domain=[A, S],
+        description="Per unit cost of decreasing the exposure of segment s for asset a",
+        records=segments[["asset", "segment_id", "rel_sell_cost"]],
+    )
+    risk_weight = gp.Parameter(
+        m,
+        domain=[A, S],
+        description="Risk weight of segment s for asset a",
+        records=segments[["asset", "segment_id", "risk_weight"]],
+    )
+    exposure = gp.Parameter(
+        m,
+        domain=[A, S],
+        description="Current exposure of segment s for asset a.",
+        records=segments[["asset", "segment_id", "exposure"]],
+    )
+    current_asset_exposure = gp.Parameter(
+        m,
+        domain=A,
+        description="Total exposure of asset a",
+    )
+    current_asset_exposure[A] = gp.Sum(AS[A, S], exposure[A, S])
+
+    # Variables
+    segment_vars = gp.Variable(
+        m,
+        domain=[A, S],
+        type="Positive",
+        description="Multiplier of original exposure for segment, asset in the rebalanced portfolio",
+    )
+    segment_increase_vars = gp.Variable(
+        m,
+        domain=[A, S],
+        type="Positive",
+        description="Increase multiplier of original exposure for segment s, asset a in the rebalanced portfolio",
+    )
+    segment_decrease_vars = gp.Variable(
+        m,
+        domain=[A, S],
+        type="Positive",
+        description="Decrease multiplier of original exposure for segment s, asset a in the rebalanced portfolio",
+    )
+    new_total_exposure = gp.Variable(
+        m,
+        description="Total exposure in new rebalanced portfolio",
+    )
+    portfolio_exposure_vars = gp.Variable(
+        m,
+        domain=A,
+        description="Total exposure in new rebalanced portfolio for asset a",
+        type="Positive",
+    )
+
+    # Constraints
+    # 1. Keep portfolio exposures within allowable limits l_a <= e_a <= u_a
+    def_exposure_lo = gp.Equation(
+        m,
+        domain=A,
+        description="Lower bound on exposure change",
+    )
+    def_exposure_lo[A] = (
+        portfolio_exposure_vars[A]
+        >= (1 - max_exposure_decrease[A]) * current_asset_exposure[A]
+    )
+
+    def_exposure_up = gp.Equation(
+        m,
+        domain=A,
+        description="Upper bound on exposure change",
+    )
+    def_exposure_up[A] = (
+        portfolio_exposure_vars[A]
+        <= (1 + max_exposure_increase[A]) * current_asset_exposure[A]
+    )
+
+    # 2. Risk Weight Constraint
+    def_risk_weight = gp.Equation(
+        m,
+        description="This constraint keeps the average risk weight at the portfolio-level below the user-defined threshold.",
+    )
+    def_risk_weight[...] = (
+        gp.Sum(AS, risk_weight[AS] * exposure[AS] * segment_vars[AS])
+        <= risk_weight_limit * new_total_exposure
+    )
+
+    # 3. Segment Relationship Constraint
+    segment_relationship = gp.Equation(
+        m,
+        domain=[A, S],
+        description="This establishes the relationship between the main segment variables and their increase/decrease components.",
+    )
+    segment_relationship[AS] = (
+        segment_vars[AS] == 1 + segment_increase_vars[AS] - segment_decrease_vars[AS]
+    )
+
+    # 4. Asset Exposure Relationship Constraint
+    asset_exposure = gp.Equation(
+        m,
+        domain=A,
+        description="This establishes the relationship between the per segment ratio and the asset level exposure of the rebalanced portfolio.",
+    )
+    asset_exposure[A] = (
+        gp.Sum(AS[A, S], exposure[AS] * segment_vars[AS]) == portfolio_exposure_vars[A]
+    )
+
+    # 5. Total Exposure Relationship Constraint
+    total_exposure = gp.Equation(
+        m,
+        description="This establishes the relationship between the per asset exposure and the total exposure of the rebalanced portfolio.",
+    )
+    total_exposure[...] = gp.Sum(A, portfolio_exposure_vars[A]) == new_total_exposure
+
+    # Objective: Expected net profit
+    net_profit = gp.Variable(m, description="Net Profit")
+    def_net_profit = gp.Equation(m, description="Definition of net profit")
+    def_net_profit[...] = net_profit == gp.Sum(
+        AS,
+        (
+            average_profitability[AS] * segment_vars[AS]
+            - rel_origination_cost[AS] * segment_increase_vars[AS]
+            - rel_sell_cost[AS] * segment_decrease_vars[AS]
         )
-        segment_increase_vars = gp.Variable(
-            domain=[A, S],
-            description="Increase multiplier of original exposure for segment s, asset a in the rebalanced portfolio",
-            type="Positive",
-        )
-        segment_decrease_vars = gp.Variable(
-            domain=[A, S],
-            description="Decrease multiplier of original exposure for segment s, asset a in the rebalanced portfolio",
-            type="Positive",
-        )
-        new_total_exposure = gp.Variable(
-            description="Total exposure in new rebalanced portfolio",
-            type="Positive",
-            records={"level": options.new_total_exposure_initial_value},
-        )
-        portfolio_exposure_vars = gp.Variable(
-            domain=A,
-            description="Total exposure in new rebalanced portfolio for asset a",
-            type="Positive",
-        )
-        portfolio_exposure_vars.lo[A] = (1 - lo_a[A]) * current_asset_exposure[A]
-        portfolio_exposure_vars.up[A] = (1 + up_a[A]) * current_asset_exposure[A]
+        * exposure[AS],
+    )
 
-        ### --- Constraints --- ###
-        # 1. Segment Relationship Constraint
-        segment_relationship = gp.Equation(
-            domain=[A, S],
-            description="This establishes the relationship between the main segment variables and their increase/decrease components.",
-        )
-        segment_relationship[AS] = (
-            segment_vars[AS]
-            == 1 + segment_increase_vars[AS] - segment_decrease_vars[AS]
-        )
+    # Create and solve model
+    model_constraints = [
+        def_exposure_lo,
+        def_exposure_up,
+        def_risk_weight,
+        segment_relationship,
+        asset_exposure,
+        total_exposure,
+        def_net_profit,
+    ]
 
-        # 2. Asset Exposure Relationship Constraint
-        asset_exposure = gp.Equation(
-            domain=A,
-            description="This establishes the relationship between the per segment ratio and the asset level exposure of the rebalanced portfolio.",
-        )
-        asset_exposure[A] = (
-            gp.Sum(AS[A, S], exposure[AS] * segment_vars[AS])
-            == portfolio_exposure_vars[A]
-        )
+    max_net_profit = gp.Model(
+        m,
+        problem=gp.Problem.LP,
+        sense=gp.Sense.MAX,
+        equations=model_constraints,
+        objective=net_profit,
+    )
 
-        # 3. Risk Weight Constraint
-        risk_weight = gp.Equation(
-            description="This constraint keeps the average risk weight at the portfolio-level below the user-defined threshold.",
-        )
-        risk_weight[...] = (
-            gp.Sum(AS, r[AS] * exposure[AS] * segment_vars[AS])
-            <= risk_weight_limit * new_total_exposure
-        )
+    max_net_profit.solve(solver="xpress", output=sys.stdout)
 
-        # 4. Total Exposure Relationship Constraint
-        total_exposure = gp.Equation(
-            description="This establishes the relationship between the per asset exposure and the total exposure of the rebalanced portfolio.",
-        )
-        total_exposure[...] = (
-            gp.Sum(A, portfolio_exposure_vars[A]) == new_total_exposure
-        )
+    # Generate results
+    # Set pandas display options for nice formatting
+    pd.set_option("display.max_rows", None)
+    pd.options.display.float_format = "{:,.2f}".format
 
-        ### --- Objectives --- ###
-        # 1. Maximize expected net profit
-        profit = gp.Sum(AS, profitability[AS] * exposure[AS] * segment_vars[AS])
-        transaction_cost = gp.Sum(
-            AS,
-            rel_origination_cost[AS] * exposure[AS] * segment_increase_vars[AS]
-            + rel_sell_cost[AS] * exposure[AS] * segment_decrease_vars[AS],
-        )
-        profit_objective_variable = gp.Variable()
-        net_profit = (
-            profit - transaction_cost == profit_objective_variable
-        )  ## Why is this done this way.
-        profit_equation = gp.Equation(definition=net_profit)
+    # Segment-level results
+    repCol = gp.Set(
+        m,
+        records=[
+            "old exposure",
+            "new exposure",
+            "cost incr",
+            "cost decr",
+            "profit",
+            "net profit",
+        ],
+    )
+    repAS = gp.Parameter(m, domain=[A, S, repCol])
+    repAS[AS, "old exposure"] = exposure[AS]
+    repAS[AS, "new exposure"] = exposure[AS] * segment_vars[AS]
+    repAS[AS, "cost incr"] = (
+        rel_origination_cost[AS] * segment_increase_vars[AS] * exposure[AS]
+    )
+    repAS[AS, "cost decr"] = (
+        rel_sell_cost[AS] * segment_decrease_vars[AS] * exposure[AS]
+    )
+    repAS[AS, "profit"] = average_profitability[AS] * segment_vars[AS] * exposure[AS]
+    repAS[AS, "net profit"] = (
+        repAS[AS, "profit"] - repAS[AS, "cost incr"] - repAS[AS, "cost decr"]
+    )
 
-        # 2. Minimize risk
-        profit_downside_var = gp.Variable(type="Positive")
-        variance = gp.Sum(
-            (A, J),
-            profit_stdev[A]
-            * profit_stdev[J]
-            * correlation_matrix[A, J]
-            * portfolio_exposure_vars[A]
-            * portfolio_exposure_vars[J]
-            / (new_total_exposure * new_total_exposure),
-        )
-        risk_equation = gp.Equation(
-            definition=z_score * profit * gp.math.sqrt(variance) <= profit_downside_var
-        )
+    # Asset-level results
+    repA = gp.Parameter(m, domain=[A, repCol])
+    repA[A, repCol] = gp.Sum(AS[A, S], repAS[AS, repCol])
 
-        alpha = gp.Parameter()
-        model = gp.Model(
-            problem=gp.Problem.QCP,
-            sense=gp.Sense.MAX,
-            equations=[
-                risk_weight,
-                segment_relationship,
-                asset_exposure,
-                total_exposure,
-                profit_equation,
-            ],
-            objective=alpha * profit_objective_variable
-            - (1 - alpha) * profit_downside_var,
-        )
+    # Portfolio-level summary
+    rep = gp.Parameter(m, domain=["*"])
+    rep[repCol] = gp.Sum(A, repA[A, repCol])
+    rep["risk weight"] = gp.Sum(
+        AS[A, S], risk_weight[AS] * exposure[AS] * segment_vars[AS]
+    )
+    rep["risk weight limit"] = risk_weight_limit * new_total_exposure
 
-        if options.consider_risk:
-            if options.profit_weight < 0:  # lexicographic
-                alpha[...] = 1
-                model.solve(solver="xpress", output=sys.stdout)
-                rel_tol = 0.1
-                profit_objective_variable.lo = profit_objective_variable.l * (
-                    1 - rel_tol
-                )
+    # Convert to DataFrames
+    segment_results = repAS.pivot()
+    asset_results = repA.pivot()
+    portfolio_summary = rep.records
 
-                alpha[...] = 0
-                model.equations.append(risk_equation)
-                model.problem = gp.Problem.NLP
-                model.solve(
-                    solver="xpress",
-                    output=sys.stdout,
-                    options=gp.Options(
-                        relative_optimality_gap=options.relative_optimality_gap
-                    ),
-                )
-            else:  # weighted
-                model.equations.append(risk_equation)
-                model.problem = gp.Problem.NLP
-                alpha[...] = options.profit_weight
-                model.solve(solver="xpress", output=sys.stdout)
-        else:
-            alpha[...] = 1
-            model.solve(solver="xpress", output=sys.stdout)
+    # Print results based on verbosity
+    if options.verbose:
+        print("\n=== Segment-Level Results (Detailed) ===")
+        print(segment_results)
 
-        print(f"Net Profit: {profit_objective_variable.toValue()}")
-        print(f"Expected Profit: {profit.toValue()}")
-        print(f"Transaction Cost: {transaction_cost.toValue()}")
-        print(f"Optimized Exposure: {new_total_exposure.toValue()}")
-        print(f"Profit Downside: {profit_downside_var.toValue()}")
+        print("\n=== Asset-Level Results ===")
+        print(asset_results)
 
-        output = build_output(
-            options,
-            segment_vars,
-            exposure,
-            portfolio_exposure_vars,
-            current_asset_exposure,
-            profit_objective_variable,
-            profit,
-            transaction_cost,
-            new_total_exposure,
-            profit_downside_var,
-        )
-
-        return output
-
-
-def build_output(
-    options: nextmv.Options,
-    segment_vars: gp.Variable,
-    exposure: gp.Parameter,
-    portfolio_exposure_vars: gp.Variable,
-    current_asset_exposure: gp.Parameter,
-    profit_objective_variable: gp.Variable,
-    profit: gp.Variable,
-    transaction_cost: gp.Variable,
-    new_total_exposure: gp.Variable,
-    profit_downside_var: gp.Variable,
-) -> nextmv.Output:
-    # Extract solution data for segments
-    segments_solution = []
-    segment_vars_df = segment_vars.records
-    exposure_df = exposure.records
-
-    for _, row in segment_vars_df.iterrows():
-        a = row["A"]  # Variable records use 'A'
-        s = row["S"]  # Variable records use 'S'
-        segment_multiplier = row["level"]
-
-        # Find original exposure (parameters also use 'A' and 'S')
-        exposure_row = exposure_df[(exposure_df["A"] == a) & (exposure_df["S"] == s)]
-        if not exposure_row.empty:
-            original_exposure = exposure_row["value"].values[0]
-            segments_solution.append(
-                {
-                    "asset": a,
-                    "segment_id": s,
-                    "original_exposure": original_exposure,
-                    "segment_multiplier": segment_multiplier,
-                    "rebalanced_exposure": original_exposure * segment_multiplier,
-                }
-            )
-
-    # Extract solution data for assets
-    assets_solution = []
-    portfolio_vars_df = portfolio_exposure_vars.records
-    current_exposure_df = current_asset_exposure.records
-
-    for _, row in portfolio_vars_df.iterrows():
-        a = row["A"]  # Variable records use 'A'
-        rebalanced_total = row["level"]
-
-        # Find original exposure
-        # Check column name - could be 'A' or 'asset'
-        asset_col_name = "asset" if "asset" in current_exposure_df.columns else "A"
-        original_row = current_exposure_df[current_exposure_df[asset_col_name] == a]
-        if not original_row.empty:
-            original_total = original_row["value"].values[0]
-            assets_solution.append(
-                {
-                    "asset": a,
-                    "original_exposure": original_total,
-                    "rebalanced_exposure": rebalanced_total,
-                    "exposure_change": rebalanced_total - original_total,
-                }
-            )
+    print("\n=== Portfolio Summary ===")
+    print(portfolio_summary)
 
     stats = nextmv.Statistics(
         result=nextmv.ResultStatistics(
+            value=net_profit.toValue(),
+            duration=max_net_profit.total_solve_time,
             custom={
-                "net_profit": profit_objective_variable.toValue(),
-                "expected_profit": profit.toValue(),
-                "transaction_cost": transaction_cost.toValue(),
                 "optimized_exposure": new_total_exposure.toValue(),
-                "profit_downside": profit_downside_var.toValue(),
+                "model_status": max_net_profit.status,
+                "num_variables": max_net_profit.num_variables,
+                "num_constraints": max_net_profit.num_equations,
             },
         )
     )
@@ -316,25 +305,55 @@ def build_output(
         output_format=nextmv.OutputFormat.MULTI_FILE,
         statistics=stats,
         solution_files=[
-            nextmv.csv_solution_file(name="segments", data=segments_solution),
-            nextmv.csv_solution_file(name="assets", data=assets_solution),
+            nextmv.csv_solution_file(
+                name="segment_results",
+                data=segment_results.to_dict(orient="records"),
+            ),
+            nextmv.csv_solution_file(
+                name="asset_results",
+                data=asset_results.to_dict(orient="records"),
+            ),
+            nextmv.csv_solution_file(
+                name="portfolio_summary",
+                data=portfolio_summary.to_dict(orient="records"),
+            ),
         ],
     )
 
     return output
 
 
-def get_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    segments = pd.read_csv(os.path.join("inputs", "segments.csv"))
-    assets = pd.read_csv(os.path.join("inputs", "assets.csv"))
-    correlation = pd.read_csv(os.path.join("inputs", "correlation.csv"))
+def get_data(folder: str = "inputs") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load portfolio data from CSV files.
 
-    return segments, assets, correlation
+    Args:
+        folder: Path to folder containing segments.csv and assets.csv (default: "inputs")
+                If a relative path is provided, it will be resolved relative to the script's directory.
+
+    Returns:
+        Tuple of (segments DataFrame, assets DataFrame)
+    """
+    # Get the directory where this script is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # If folder is relative, make it relative to the script directory
+    if not os.path.isabs(folder):
+        folder = os.path.join(script_dir, folder)
+
+    segments = pd.read_csv(os.path.join(folder, "segments.csv"))
+    assets = pd.read_csv(os.path.join(folder, "assets.csv"))
+    return segments, assets
 
 
 if __name__ == "__main__":
+    # Load Nextmv options.
     manifest = nextmv.Manifest.from_yaml(dirpath=".")
     options = manifest.extract_options()
-    segments, assets, correlation = get_data()
-    output = main(segments, assets, correlation, options)
-    nextmv.write(output=output, path="outputs")
+
+    # Load data
+    segments, assets = get_data()
+
+    # Run optimization, verbosity defined by an option.
+    output = main(segments, assets, options)
+    nextmv.write(output, path="outputs")
