@@ -1,0 +1,63 @@
+type: python
+runtime: ghcr.io/nextmv-io/runtime/gamspy:latest
+files:
+  - main.py
+python:
+  pip-requirements: requirements.txt
+execution:
+  entrypoint: main.py
+configuration:
+  content:
+    format: multi-file
+    multi-file:
+      input:
+        path: inputs
+      output:
+        solutions: outputs/solutions
+        statistics: outputs/statistics/statistics.json
+        assets: outputs/assets/assets.json
+  options:
+    items:
+      - name: risk_weight_limit
+        description: Maximum allowable average risk weight for the portfolio
+        required: false
+        option_type: float
+        default: 0.5
+        additional_attributes:
+          min: 0
+          max: 1
+          step: 0.01
+        ui:
+          control_type: slider
+          display_name: Risk Weight Limit
+      - name: verbose
+        description: Whether to print detailed segment and asset-level results
+        required: false
+        option_type: bool
+        default: false
+        ui:
+          display_name: Verbose Output
+      - name: target
+        description: Profit target (minimum profit as fraction of maximum)
+        required: false
+        option_type: float
+        default: 0.8
+        additional_attributes:
+          min: 0.05
+          max: 1.00
+          step: 0.05
+        ui:
+          control_type: slider
+          display_name: Profit Target
+      - name: objective
+        description: Optimization objective
+        required: false
+        option_type: string
+        default: objective_2
+        additional_attributes:
+          values:
+            - objective_1
+            - objective_2
+        ui:
+          control_type: select
+          display_name: Objective
