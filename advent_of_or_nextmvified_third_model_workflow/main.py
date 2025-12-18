@@ -48,7 +48,7 @@ class PortfolioOptimizationWorkflow(FlowSpec):
         segments, assets, covariance_df = get_data()
 
         # Load options from manifest
-        manifest = nextmv.Manifest.from_yaml(dirpath="advent_of_or_nextmvified_third_model_workflow")
+        manifest = nextmv.Manifest.from_yaml(dirpath=".")
         options = manifest.extract_options()
 
         return {
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     result = flow.run()
 
     # Write output
-    nextmv.write(result, path="advent_of_or_nextmvified_third_model_workflow/outputs")
+    nextmv.write(result, path="./outputs")
 
     print("\n" + "=" * 60)
     print("Workflow completed successfully!")
