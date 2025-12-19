@@ -181,10 +181,12 @@ if __name__ == "__main__":
 
     # Create workflow instance with name and input (None since we load data in start step)
     flow = PortfolioOptimizationWorkflow("PortfolioOptimization", None)
-    flow.get_result(flow.pick_best)
 
     # Execute workflow
-    result = flow.run()
+    flow.run()
+
+    # Retrieve result from the final step
+    result = flow.get_result(flow.pick_best)
 
     # Write output
     nextmv.write(result, path="./outputs")
