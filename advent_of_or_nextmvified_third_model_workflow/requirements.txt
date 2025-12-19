@@ -1,5 +1,5 @@
-nextmv[all]>=0.36.0
-nextpipe
+nextmv[all]>=0.37.2
+nextpipe>=0.5.0
 pandas>=2.3.3
 gamspy>=1.18.1
 plotly>=5.18.0
