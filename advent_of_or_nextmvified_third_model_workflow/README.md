@@ -1,12 +1,14 @@
 # Advent of OR - Nextmv-ified (Third Model with Decision Workflow)
 
-Portfolio rebalancing optimization with CVaR risk measure using a **Nextmv Decision Workflow** to orchestrate parallel optimization approaches.
+Portfolio rebalancing optimization with CVaR risk measure using a **Nextmv
+Decision Workflow** to orchestrate parallel optimization approaches.
 
 ## Decision Workflow Overview
 
-This implementation uses [Nextpipe](https://www.nextmv.io/docs/using-nextmv/workflows/decision-workflows) to orchestrate multiple optimization strategies in a single workflow:
+This implementation uses [Nextpipe](https://nextpipe.docs.nextmv.io/en/latest/)
+to orchestrate multiple optimization strategies in a single workflow:
 
-```
+```text
                     ┌─────────────────┐
                     │   start (input) │
                     └────────┬────────┘
@@ -34,23 +36,32 @@ This implementation uses [Nextpipe](https://www.nextmv.io/docs/using-nextmv/work
 ```
 
 **Workflow Features:**
-- **Parallel Execution**: Objective 1 (two-stage) and Objective 2 (hierarchical) run in parallel
-- **Sequential Stages**: For Objective 1, Stage 1 (maximize profit) must complete before Stage 2 (minimize CVaR with profit floor)
-- **Automatic Selection**: The workflow automatically selects the result with the lowest CVaR (risk-averse)
+
+- **Parallel Execution**: Objective 1 (two-stage) and Objective 2
+  (hierarchical) run in parallel
+- **Sequential Stages**: For Objective 1, Stage 1 (maximize profit) must
+  complete before Stage 2 (minimize CVaR with profit floor)
+- **Automatic Selection**: The workflow automatically selects the result with
+  the lowest CVaR (risk-averse)
 
 ## Model Overview
 
 **Optimization Approaches:**
+
 - **Objective 1 (Two-Stage Solution Pool)**:
   - Stage 1: Maximizes net profit to find upper bound
-  - Stage 2: Minimizes CVaR with profit constraint (target × max_profit), using XPRESS solution pool
-- **Objective 2 (Hierarchical Multi-Objective)**: Combines profit maximization and CVaR minimization in a weighted formulation (profit - 0.5 × CVaR)
+  - Stage 2: Minimizes CVaR with profit constraint (target × max_profit), using
+    XPRESS solution pool
+- **Objective 2 (Hierarchical Multi-Objective)**: Combines profit maximization
+  and CVaR minimization in a weighted formulation (profit - 0.5 × CVaR)
 
 **Visualizations:**
+
 - **Input Analysis Tab:**
   - Correlation Heatmap: Shows asset correlation matrix from covariance data
 - **Rebalancing Results Tab:**
-  - Treemap: Portfolio composition with % change overlay (size = exposure, color = % change)
+  - Treemap: Portfolio composition with % change overlay (size = exposure,
+    color = % change)
   - Butterfly Chart: Diverging bar chart showing exposure changes by asset
   - Waterfall: Net profit contribution by asset
 
@@ -164,17 +175,17 @@ advent_of_or_nextmvified_third_model_workflow/
 1. Create a Nextmv Cloud application (or use existing one).
 
    ```bash
-   $ nextmv app create -n gams-portfolio-workflow -a gams-portfolio-workflow
+   nextmv app create -n gams-portfolio-workflow -a gams-portfolio-workflow
    ```
 
 1. Push the code to Nextmv.
 
    ```bash
-   $ nextmv app push -a gams-portfolio-workflow
+   nextmv app push -a gams-portfolio-workflow
    ```
 
 1. Run remotely from the [Nextmv Console](https://cloud.nextmv.io) or the CLI.
 
    ```bash
-   $ nextmv app run -a gams-portfolio-workflow -i inputs
+   nextmv app run -a gams-portfolio-workflow -i inputs
    ```
