@@ -222,3 +222,5 @@ out/
 # Nextmv stuff
 .nextmv
 outputs/
+workflow_inputs/
+.vscode/

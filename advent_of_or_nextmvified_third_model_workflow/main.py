@@ -22,6 +22,11 @@ manifest = nextmv.Manifest.from_yaml(dirpath=".")
 options = manifest.extract_options()
 cloud_opt = options.to_dict_cloud()
 
+# Instantitate the Nextmv Cloud sub app. This is only needed to get the sub
+# app's assets.
+client = cloud.Client(api_key=os.getenv("NEXTMV_API_KEY"))
+cloud_sub_app = cloud.Application(client=client, id="gams-portfolio-rebalancing")
+
 
 class PortfolioOptimizationWorkflow(FlowSpec):
     """
@@ -30,11 +35,9 @@ class PortfolioOptimizationWorkflow(FlowSpec):
     Workflow structure:
         start
           |
-          +-- run_objective_2 (parallel) --------+
+          +-- run_objective_1 (parallel) --------+
           |                                      |
-          +-- run_stage1_profit_step (parallel)  |
-                    |                            |
-              run_stage2_cvar_step               |
+          +-- run_objective_2 (parallel)         |
                     |                            |
                     +----------------------------+
                                 |
@@ -42,12 +45,13 @@ class PortfolioOptimizationWorkflow(FlowSpec):
     """
 
     @step
-    def start(_) -> dict[str, Any]:
+    def read_inputs(_) -> dict[str, Any]:
         """
         Load input data and prepare for parallel branches.
 
-        Returns data dict to be passed to parallel optimization branches.
+        Returns the directory containing input CSV files.
         """
+
         # Load data
         segments, assets, covariance_df = get_data()
 
@@ -61,15 +65,17 @@ class PortfolioOptimizationWorkflow(FlowSpec):
         return inputs_dir
 
     @app(
-        app_id="gams-portfolio-rebalancing",
+        app_id=cloud_sub_app.id,
         options=cloud_opt | {"objective": "objective_1"},
         full_result=True,
     )
-    @needs(predecessors=[start])
+    @needs(predecessors=[read_inputs])
     @step
     def run_objective_1() -> None:
         """
         Run two-stage optimization approach (objective_1).
+
+        This branch runs in parallel with the hierarchical multi-objective
         """
 
         log("\n" + "=" * 60)
@@ -77,31 +83,36 @@ class PortfolioOptimizationWorkflow(FlowSpec):
         log("=" * 60)
 
     @app(
-        app_id="gams-portfolio-rebalancing",
+        app_id=cloud_sub_app.id,
         options=cloud_opt | {"objective": "objective_2"},
         full_result=True,
     )
-    @needs(predecessors=[start])
+    @needs(predecessors=[read_inputs])
     @step
     def run_objective_2() -> None:
         """
         Run hierarchical multi-objective approach (objective_2).
 
-        This branch runs in parallel with run_stage1_profit_step.
+        This branch runs in parallel with the two-stage approach.
         """
+
         log("\n" + "=" * 60)
         log("BRANCH: Objective 2 - Single-Stage Weighted Multi-Objective")
         log("=" * 60)
 
     @needs(predecessors=[run_objective_1, run_objective_2])
     @step
-    def pick_best(result_1: nextmv.RunResult, result_2: nextmv.RunResult):
+    def pick_best(
+        result_1: nextmv.RunResult,
+        result_2: nextmv.RunResult,
+    ) -> dict[str, Any]:
         """
         Select the result with the lowest CVaR (risk-averse selection).
 
         Compares results from both optimization approaches and returns
         the one with lower CVaR.
         """
+
         log("\n" + "=" * 60)
         log("SELECTING BEST RESULT (Minimum CVaR)")
         log("=" * 60)
@@ -114,17 +125,44 @@ class PortfolioOptimizationWorkflow(FlowSpec):
 
         if cvar_1 <= cvar_2:
             log("\n  Selected: Objective 1 (lower CVaR)")
-            result_path = result_1.output
-            result_stats = result_1.metadata.statistics
+            result = result_1
             selected_approach = "objective_1"
-        else:
-            log("\n  Selected: Objective 2 (lower CVaR)")
-            result_path = result_2.output
-            result_stats = result_2.metadata.statistics
-            selected_approach = "objective_2"
 
-        # Simply copy the files from the given directory to the expected output
-        # directory.
+            return {
+                "result": result,
+                "approach": selected_approach,
+                "cvar_1": cvar_1,
+                "cvar_2": cvar_2,
+            }
+
+        log("\n  Selected: Objective 2 (lower CVaR)")
+        result = result_2
+        selected_approach = "objective_2"
+
+        return {
+            "result": result,
+            "approach": selected_approach,
+            "cvar_1": cvar_1,
+            "cvar_2": cvar_2,
+        }
+
+    @needs(predecessors=[pick_best])
+    @step
+    def write_outputs(pick_best_result: dict[str, Any]) -> None:
+        """
+        Write selected result outputs to expected locations.
+        """
+
+        result = pick_best_result["result"]
+        approach = pick_best_result["approach"]
+        cvar_1 = pick_best_result["cvar_1"]
+        cvar_2 = pick_best_result["cvar_2"]
+
+        result_path = result.output
+        result_stats = result.metadata.statistics
+
+        # Get the solution files from the selected result and copy them to the
+        # expected location.
         solutions_dir = os.path.join("outputs", "solutions")
         os.makedirs(solutions_dir, exist_ok=True)
         for file_name in os.listdir(result_path):
@@ -132,17 +170,35 @@ class PortfolioOptimizationWorkflow(FlowSpec):
             if os.path.isfile(full_file_name):
                 shutil.copy(full_file_name, solutions_dir)
 
-        # Add selection metadata to statistics to and write them to final location.
-        result_stats["selected_approach"] = selected_approach
+        # Add selection metadata to statistics to and write them to expected
+        # statistics location.
+        result_stats["selected_approach"] = approach
         result_stats["objective_1_cvar"] = cvar_1
         result_stats["objective_2_cvar"] = cvar_2
         final_statistics = {"statistics": result_stats}
         stats_dir = os.path.join("outputs", "statistics")
         os.makedirs(stats_dir, exist_ok=True)
-        nextmv.write(
-            final_statistics,
-            path=os.path.join(stats_dir, "statistics.json"),
-        )
+        nextmv.write(final_statistics, path=os.path.join(stats_dir, "statistics.json"))
+
+        # Get the assets from the selected result and copy them to the expected
+        # location. Right now, only a single asset has all the visuals.
+        run_id = result.id
+        run_assets = cloud_sub_app.list_assets(run_id)
+        assets = []
+        for run_asset in run_assets:
+            content = cloud_sub_app.download_asset_content(asset=run_asset)
+            asset = nextmv.Asset(
+                name=run_asset.name,
+                content_type=run_asset.content_type,
+                visual=run_asset.visual,
+                content=content,
+            )
+            assets.append(asset.to_dict())
+
+        final_assets = {"assets": assets}
+        assets_dir = os.path.join("outputs", "assets")
+        os.makedirs(assets_dir, exist_ok=True)
+        nextmv.write(final_assets, path=os.path.join(assets_dir, "assets.json"))
 
 
 def get_data(folder: str = "inputs") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -155,6 +211,7 @@ def get_data(folder: str = "inputs") -> tuple[pd.DataFrame, pd.DataFrame, pd.Dat
     Returns:
         Tuple of (segments DataFrame, assets DataFrame, covariance DataFrame)
     """
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     if not os.path.isabs(folder):
@@ -174,7 +231,6 @@ if __name__ == "__main__":
 
     # Create workflow instance with name and input (None since we load data in
     # start step)
-    client = cloud.Client(api_key=os.getenv("NEXTMV_API_KEY"))
     flow = PortfolioOptimizationWorkflow(
         name="PortfolioOptimization",
         input=None,
